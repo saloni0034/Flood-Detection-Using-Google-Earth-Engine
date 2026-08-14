@@ -1,2 +1,116 @@
+// =============================================
+// Flood Detection using Google Earth Engine
+// Export Flooded Areas to BigQuery
+// =============================================
 
-// Define the AOI around Lancaster, England (WGS84 coordinates). var aoi = ee.Geometry.Polygon( [[[-2.92, 54.10], [-2.92, 53.99], [-2.67, 53.99], [-2.67, 54.10]]], null, false); // Select from the Sentinel-1 image collection (log scaling and VV co-polar) and filter by the defined AOI. var collection = ee.ImageCollection('COPERNICUS/S1_GRD') .filterBounds(aoi) .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')) .select('VV'); // Center the map around the defined AOI at zoom level 13. Map.centerObject(aoi, 13); // Define a radius variable used to smooth the data to remove noise. var SMOOTHING_RADIUS_METERS = 100; // Filter by date (before flood) and smooth the image. var before = collection.filterDate('2017-11-01', '2017-11-17') .mosaic() .focalMedian(SMOOTHING_RADIUS_METERS, 'circle', 'meters'); // Filter by date (after flood) and smooth the image. var after = collection.filterDate('2017-11-18', '2017-11-23') .mosaic() .focalMedian(SMOOTHING_RADIUS_METERS, 'circle', 'meters'); // Calculate the difference between before and after rain images. var diffSmoothed = after.subtract(before); // Use threshold smoothed radar intensities to identify areas with standing water. var DIFF_THRESHOLD_DB = -3; var diffThresholded = diffSmoothed.lt(DIFF_THRESHOLD_DB); // Display the smoothed difference image on the map. Map.addLayer(diffSmoothed, {min: -10, max: 10}, 'Difference'); // Identify and remove global surface water (lakes, rivers, etc). var jrcData0 = ee.Image('JRC/GSW1_0/Metadata') .select('total_obs') .lte(0); var waterMask = ee.Image('JRC/GSW1_0/GlobalSurfaceWater') .select('occurrence') .unmask(0) .max(jrcData0) .lt(50); // Define a mask for persistent water (more than 50% of the time). // Create the final flooded image with persistent water removed. var floodedPixels = diffThresholded.updateMask(waterMask); // Display the final flooded image pixels with persistent water removed. Map.addLayer(floodedPixels, {min: -10, max: 10}, 'Difference'); // Convert patches of pixels to polygons (vectors). var vectors = floodedPixels.reduceToVectors({ geometry: aoi, scale: 10, geometryType: 'polygon', eightConnected: false // only connect if pixels share an edge }); // Eliminate large features in the dataset. var MAX_AREA = 500 * 1000; // units in m^2 vectors = vectors.map(function (f) { return f.set('area', f.geometry().area(10)); }).filter(ee.Filter.lt("area", MAX_AREA)); // Display the final flooded vector polygons on the map. Map.addLayer(vectors, {color: 'blue'}, 'Flooded areas'); // This function already includes the current project, existing BigQuery dataset name, and BigQuery table name to be created. Export.table.toBigQuery({ collection: vectors, description:'ee2bq_export_polygons', table: 'qwiklabs-gcp-04-fcd0399b3feb.ee_to_bq.flooded_areas' });
+// Define the Area of Interest (AOI) around Lancaster, England.
+var aoi = ee.Geometry.Polygon(
+  [[
+    [-2.92, 54.10],
+    [-2.92, 53.99],
+    [-2.67, 53.99],
+    [-2.67, 54.10]
+  ]],
+  null,
+  false
+);
+
+// Load Sentinel-1 SAR Image Collection (VV polarization)
+var collection = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(aoi)
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .select('VV');
+
+// Center the map on the AOI
+Map.centerObject(aoi, 13);
+
+// ---------------------------------------------
+// Image Preprocessing
+// ---------------------------------------------
+
+// Radius used for median smoothing (meters)
+var SMOOTHING_RADIUS_METERS = 100;
+
+// Before-flood image
+var before = collection
+  .filterDate('2017-11-01', '2017-11-17')
+  .mosaic()
+  .focalMedian(SMOOTHING_RADIUS_METERS, 'circle', 'meters');
+
+// After-flood image
+var after = collection
+  .filterDate('2017-11-18', '2017-11-23')
+  .mosaic()
+  .focalMedian(SMOOTHING_RADIUS_METERS, 'circle', 'meters');
+
+// ---------------------------------------------
+// Flood Detection
+// ---------------------------------------------
+
+// Calculate radar backscatter difference
+var diffSmoothed = after.subtract(before);
+
+// Flood threshold (dB)
+var DIFF_THRESHOLD_DB = -3;
+
+// Identify flooded pixels
+var diffThresholded = diffSmoothed.lt(DIFF_THRESHOLD_DB);
+
+// Display radar difference
+Map.addLayer(diffSmoothed, {min: -10, max: 10}, 'Difference');
+
+// ---------------------------------------------
+// Remove Permanent Water Bodies
+// ---------------------------------------------
+
+var jrcData0 = ee.Image('JRC/GSW1_0/Metadata')
+  .select('total_obs')
+  .lte(0);
+
+var waterMask = ee.Image('JRC/GSW1_0/GlobalSurfaceWater')
+  .select('occurrence')
+  .unmask(0)
+  .max(jrcData0)
+  .lt(50); // Keep pixels with water occurrence < 50%
+
+// Apply water mask
+var floodedPixels = diffThresholded.updateMask(waterMask);
+
+// Display filtered flood pixels
+Map.addLayer(floodedPixels, {min: -10, max: 10}, 'Flood Pixels');
+
+// ---------------------------------------------
+// Convert Flood Pixels to Vector Polygons
+// ---------------------------------------------
+
+var vectors = floodedPixels.reduceToVectors({
+  geometry: aoi,
+  scale: 10,
+  geometryType: 'polygon',
+  eightConnected: false
+});
+
+// ---------------------------------------------
+// Remove Large False Positives
+// ---------------------------------------------
+
+var MAX_AREA = 500 * 1000; // 500,000 m²
+
+vectors = vectors
+  .map(function(feature) {
+    return feature.set('area', feature.geometry().area(10));
+  })
+  .filter(ee.Filter.lt('area', MAX_AREA));
+
+// Display final flood polygons
+Map.addLayer(vectors, {color: 'blue'}, 'Flooded Areas');
+
+// ---------------------------------------------
+// Export to BigQuery
+// ---------------------------------------------
+
+Export.table.toBigQuery({
+  collection: vectors,
+  description: 'ee2bq_export_polygons',
+  table: 'qwiklabs-gcp-04-fcd0399b3feb.ee_to_bq.flooded_areas'
+});
